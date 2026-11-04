@@ -5,6 +5,15 @@ export const CONFIG = {
   stt: {
     model: "whisper-large-v3"
   },
+  audio: {
+  inputSampleRate: 16000,
+  inputChannels: 1,
+  inputBitDepth: 16,
+
+  sampleRate: 24000,
+  channels: 1,
+  bitDepth: 16
+},
 
   llm: {
     model: "openai/gpt-oss-20b",

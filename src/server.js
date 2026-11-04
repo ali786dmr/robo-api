@@ -6,21 +6,31 @@ import cors from "cors";
 import multer from "multer";
 import fs from "node:fs";
 import path from "node:path";
+import { once } from "node:events";
 
 import { CONFIG } from "./config/config.js";
-
-import { transcribeAudio } from "./services/stt.js";
-import { generateResponse } from "./services/llm.js";
-import { generateSpeech } from "./services/tts.js";
 import { formatSpeechText } from "./utils/textFormatter.js";
+
+import {
+  transcribeAudio,
+  transcribePcmBuffer
+} from "./services/stt.js";
+
+import {
+  generateResponse,
+  generateResponseStream
+} from "./services/llm.js";
+
+import {
+  generateSpeech,
+  streamSpeechPcm
+} from "./services/tts.js";
 
 import {
   prepareConversation,
   saveConversationTurn,
   clearConversation
 } from "./services/conversationManager.js";
-
-import { getHistory } from "./services/memory.js";
 
 import {
   getActiveConversation,
@@ -29,24 +39,72 @@ import {
 } from "./services/activeConversation.js";
 
 const app = express();
-
-app.use(cors());
-app.use(express.json());
-
 const tempDir = path.resolve("temp");
 
 fs.mkdirSync(tempDir, { recursive: true });
 
-// Accept WebM and other audio uploads.
-// Do not reject files based only on MIME type.
+app.use(cors());
+app.use(express.json());
+
 const upload = multer({
   dest: tempDir,
-  limits: {
-    fileSize: 25 * 1024 * 1024
-  }
+  limits: { fileSize: 25 * 1024 * 1024 }
 });
 
-// Server health
+const RESET_REPLY =
+  "Bilkul yaar! Nayi conversation shuru karte hain. Batao, kya chal raha hai?";
+
+// Helpers
+async function getSession(transcript, forceNew = false) {
+  if (forceNew) {
+    const conversationId = await resetActiveConversation();
+
+    return {
+      conversationId,
+      history: [],
+      isNew: true,
+      resetCommand: false
+    };
+  }
+
+  const activeId = await getActiveConversation();
+
+  const session = await prepareConversation(activeId, transcript);
+
+  if (session.isNew) {
+    await createNewConversation();
+    session.conversationId = await getActiveConversation();
+  }
+
+  return session;
+}
+
+async function writeChunk(res, chunk) {
+  if (res.destroyed) {
+    throw new Error("Client disconnected");
+  }
+
+  if (!res.write(chunk)) {
+    await once(res, "drain");
+  }
+}
+
+function sendError(res, error) {
+  console.error("[ERROR]", error);
+
+  if (!res.headersSent) {
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Something went wrong"
+    });
+  }
+
+  if (!res.destroyed) {
+    res.destroy(error);
+  }
+}
+
+// Health
 app.get("/", (req, res) => {
   res.json({
     name: "Vijay Thalapathy AI",
@@ -57,7 +115,7 @@ app.get("/", (req, res) => {
   });
 });
 
-// Main chat endpoint
+// Normal chat: Audio upload -> JSON + WAV
 app.post("/chat", upload.single("audio"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({
@@ -69,112 +127,42 @@ app.post("/chat", upload.single("audio"), async (req, res) => {
   const started = Date.now();
 
   try {
-    console.log("\n[Vijay] New request...");
-
-    // 1. Speech to text
-    console.time("STT");
-
     const transcript = await transcribeAudio(req.file.path);
 
-    console.timeEnd("STT");
-
-    if (!transcript || !transcript.trim()) {
+    if (!transcript?.trim()) {
       throw new Error("No speech detected");
     }
 
-    console.log("[User]:", transcript);
+    console.log("[USER]", transcript);
 
-    // 2. Get or create active conversation
-    console.time("MEMORY");
-
-    let session;
-
-    const forceNew = req.body.newConversation === "true";
-
-    if (forceNew) {
-      await resetActiveConversation();
-
-      session = {
-        conversationId: await getActiveConversation(),
-        history: [],
-        isNew: true,
-        resetCommand: false
-      };
-    } else {
-      const activeId = await getActiveConversation();
-
-      session = await prepareConversation(
-        activeId,
-        transcript
-      );
-
-      // Save the selected conversation as active.
-      if (session.isNew) {
-        await createNewConversation();
-        session.conversationId = await getActiveConversation();
-      }
-    }
-
-    console.timeEnd("MEMORY");
-
-    const conversationId = session.conversationId;
-
-    console.log(
-      "[Memory]",
-      session.isNew ? "New conversation" : "Continuing conversation"
+    const session = await getSession(
+      transcript,
+      req.body.newConversation === "true"
     );
 
-    // 3. Generate LLM response
-    let answer;
+    const rawAnswer = session.resetCommand
+      ? RESET_REPLY
+      : await generateResponse(transcript, session.history);
 
-    if (session.resetCommand) {
-      answer = "Bilkul yaar! Nayi conversation shuru karte hain. Batao, kya chal raha hai?";
-    } else {
-      console.time("LLM");
+    const answer = formatSpeechText(rawAnswer);
 
-      const rawAnswer = await generateResponse(
-        transcript,
-        session.history
-      );
+    console.log("[VIJAY]", answer);
 
-      answer = formatSpeechText(rawAnswer);
-
-      console.timeEnd("LLM");
-    }
-
-    console.log("[Vijay]:", answer);
-
-    // 4. Save conversation
     await saveConversationTurn(
-      conversationId,
+      session.conversationId,
       transcript,
       answer
     );
 
-    // 5. Generate speech and WAV
-    console.time("TTS + WAV");
-
     const audio = await generateSpeech(answer);
 
-    console.timeEnd("TTS + WAV");
-
-    const totalTime = Date.now() - started;
-
-    console.log("[Vijay] Completed:", totalTime, "ms");
-
-    // 6. Return response
     res.json({
       success: true,
       provider: "Microsoft Edge TTS",
-
-      conversationId,
-      conversationStatus: session.isNew
-        ? "new"
-        : "continued",
-
+      conversationId: session.conversationId,
+      conversationStatus: session.isNew ? "new" : "continued",
       transcript,
       response: answer,
-
       audio: {
         url: `/audio/${audio.id}`,
         format: audio.format,
@@ -183,24 +171,157 @@ app.post("/chat", upload.single("audio"), async (req, res) => {
         bitDepth: audio.bitDepth,
         sizeBytes: audio.fileSize
       },
-
-      processingTimeMs: totalTime
+      processingTimeMs: Date.now() - started
     });
 
   } catch (error) {
-    console.error("[Vijay Error]:", error);
-
-    res.status(500).json({
-      success: false,
-      error: error.message || "Something went wrong"
-    });
-
+    sendError(res, error);
   } finally {
     fs.promises.unlink(req.file.path).catch(() => {});
   }
 });
 
-// Manually reset conversation
+// Streaming chat: Microphone PCM -> Speaker PCM
+app.post("/chat/stream", async (req, res) => {
+  const started = Date.now();
+  let responseStarted = false;
+
+  try {
+    console.log("\n[Vijay] New streaming request");
+
+    const sampleRate = Number(
+      req.headers["x-audio-sample-rate"] || 16000
+    );
+
+    if (sampleRate !== 16000) {
+      return res.status(400).json({
+        success: false,
+        error: "Microphone must be 16000Hz PCM."
+      });
+    }
+
+    // Receive microphone audio
+    const chunks = [];
+    let totalBytes = 0;
+    const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
+
+    for await (const chunk of req) {
+      totalBytes += chunk.length;
+
+      if (totalBytes > MAX_AUDIO_BYTES) {
+        return res.status(413).json({
+          success: false,
+          error: "Recording too large."
+        });
+      }
+
+      chunks.push(chunk);
+    }
+
+    if (!totalBytes) {
+      return res.status(400).json({
+        success: false,
+        error: "No microphone audio received."
+      });
+    }
+
+    const pcmBuffer = Buffer.concat(chunks, totalBytes);
+
+    console.log("[MIC] Received:", totalBytes, "bytes");
+
+    // Speech recognition
+    const transcript = await transcribePcmBuffer(
+      pcmBuffer,
+      sampleRate
+    );
+
+    if (!transcript?.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "No speech detected."
+      });
+    }
+
+    console.log("[USER]", transcript);
+
+    // Conversation memory
+    const session = await getSession(
+      transcript,
+      req.headers["x-new-conversation"] === "true"
+    );
+
+    // LLM response
+    const rawAnswer = session.resetCommand
+      ? RESET_REPLY
+      : await generateResponseStream(
+          transcript,
+          session.history,
+          async () => {}
+        );
+
+    const answer = formatSpeechText(rawAnswer);
+
+    console.log("[VIJAY]", answer);
+
+    await saveConversationTurn(
+      session.conversationId,
+      transcript,
+      answer
+    );
+
+    // Raw 8-bit PCM response. No JSON in the body.
+    res.status(200);
+
+    res.set({
+      "Content-Type": "application/octet-stream",
+      "Cache-Control": "no-store, no-transform",
+      "X-Audio-Format": "pcm_u8",
+      "X-Audio-Sample-Rate": "24000",
+      "X-Audio-Channels": "1",
+      "X-Audio-Bit-Depth": "8",
+      "X-Conversation-Id": session.conversationId
+    });
+
+    res.flushHeaders();
+    responseStarted = true;
+
+    console.log("[STREAM] Sending raw unsigned 8-bit PCM");
+
+    let audioChunks = 0;
+    let audioBytes = 0;
+
+    for await (const chunk of streamSpeechPcm(answer)) {
+      await writeChunk(res, chunk);
+
+      audioChunks++;
+      audioBytes += chunk.length;
+    }
+
+    const processingTimeMs = Date.now() - started;
+
+    console.log("[STREAM] Audio complete", {
+      audioChunks,
+      audioBytes,
+      durationSeconds: (audioBytes / 24000).toFixed(2),
+      processingTimeMs
+    });
+
+    if (!res.destroyed) {
+      res.end();
+    }
+
+  } catch (error) {
+    console.error("[STREAM ERROR]", error);
+
+    if (responseStarted) {
+      if (!res.destroyed) res.destroy(error);
+    } else {
+      sendError(res, error);
+    }
+  }
+});
+
+// Reset conversation
 app.post("/reset", async (req, res) => {
   try {
     const conversationId = await resetActiveConversation();
@@ -210,16 +331,12 @@ app.post("/reset", async (req, res) => {
       conversationId,
       message: "New conversation started."
     });
-
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    sendError(res, error);
   }
 });
 
-// Delete a conversation
+// Delete conversation
 app.delete("/chat/:id", async (req, res) => {
   try {
     await clearConversation(req.params.id);
@@ -228,16 +345,12 @@ app.delete("/chat/:id", async (req, res) => {
       success: true,
       message: "Conversation deleted."
     });
-
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    sendError(res, error);
   }
 });
 
-// Download generated WAV
+// Download WAV
 app.get("/audio/:id", (req, res) => {
   if (!/^[a-f0-9-]{36}$/.test(req.params.id)) {
     return res.status(400).json({
@@ -245,10 +358,7 @@ app.get("/audio/:id", (req, res) => {
     });
   }
 
-  const filePath = path.join(
-    tempDir,
-    `${req.params.id}.wav`
-  );
+  const filePath = path.join(tempDir, `${req.params.id}.wav`);
 
   if (!fs.existsSync(filePath)) {
     return res.status(404).json({
@@ -256,13 +366,13 @@ app.get("/audio/:id", (req, res) => {
     });
   }
 
-  res.setHeader("Content-Type", "audio/wav");
+  res.type("audio/wav");
   res.sendFile(filePath);
 });
 
-// JSON error handling, including upload errors
+// Error handler
 app.use((error, req, res, next) => {
-  console.error("[Upload Error]:", error.message);
+  console.error("[SERVER ERROR]", error.message);
 
   if (res.headersSent) {
     return next(error);
@@ -283,7 +393,5 @@ app.listen(CONFIG.port, "0.0.0.0", () => {
   console.log("STT: Groq Whisper Large V3");
   console.log("LLM:", CONFIG.llm.model);
   console.log("TTS: Microsoft Madhur");
-  console.log("Memory: Redis");
-  console.log("Expiry: 24 hours");
-  console.log("Audio: 24kHz PCM WAV");
+  console.log("Output: 24kHz unsigned 8-bit PCM Mono");
 });
