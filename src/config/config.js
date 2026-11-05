@@ -5,15 +5,21 @@ export const CONFIG = {
   stt: {
     model: "whisper-large-v3"
   },
-  audio: {
-  inputSampleRate: 16000,
-  inputChannels: 1,
-  inputBitDepth: 16,
 
-  sampleRate: 24000,
-  channels: 1,
-  bitDepth: 16
-},
+  audio: {
+    // Microphone input
+    inputSampleRate: 16000,
+    inputChannels: 1,
+    inputBitDepth: 16,
+
+    // ESP32 streaming output
+    sampleRate: 24000,
+    channels: 1,
+    bitDepth: 8,
+
+    // Normal /chat WAV output
+    wavBitDepth: 16
+  },
 
   llm: {
     model: "openai/gpt-oss-20b",
@@ -22,15 +28,15 @@ export const CONFIG = {
   },
 
   tts: {
-    voice: "hi-IN-MadhurNeural",
-    lang: "hi-IN",
-    rate: "+20%",
-    outputFormat: "audio-24khz-96kbitrate-mono-mp3"
-  },
+    provider: "fish",
+    model: "s2.1-pro-free",
 
-  audio: {
-    sampleRate: 24000,
-    channels: 1,
-    bitDepth: 16
+    format: "mp3",
+    sampleRate: 44100,
+    mp3Bitrate: 128,
+
+    outputSampleRate: 24000,
+    outputChannels: 1,
+    outputBitDepth: 8
   }
 };

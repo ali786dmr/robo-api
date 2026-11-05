@@ -18,15 +18,9 @@ export async function getActiveConversation() {
 }
 
 export async function createNewConversation() {
-  // Delete the previous active conversation and its history
-  const previousId = await redis.get(ACTIVE_KEY);
-
-  if (previousId) {
-    await redis.del(`vijay:chat:${previousId}`);
-  }
-
   const id = randomUUID();
 
+  // Preserve previous conversations until their TTL expires.
   await redis.set(ACTIVE_KEY, id, {
     EX: TTL
   });
@@ -35,6 +29,8 @@ export async function createNewConversation() {
 }
 
 export async function refreshActiveConversation(id) {
+  if (!id) return;
+
   await redis.set(ACTIVE_KEY, id, {
     EX: TTL
   });

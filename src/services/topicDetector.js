@@ -10,9 +10,9 @@ export async function isRelatedToConversation(
   newMessage,
   history
 ) {
-  if (!history.length) return true;
+  if (!history?.length) return true;
 
-  const recentHistory = history.slice(-8);
+  const recentHistory = history.slice(-12);
 
   const completion = await groq.chat.completions.create({
     model: CONFIG.llm.model,
@@ -21,36 +21,86 @@ export async function isRelatedToConversation(
       {
         role: "system",
         content: `
-You are Vijay's conversation topic detector.
+You are Vijay's intelligent conversation continuity detector.
 
-Decide whether the user's latest message
-belongs to the previous conversation.
+Your job is to decide whether a new user message
+should continue the existing conversation or start a new one.
 
 Return exactly one word:
 RELATED or NEW.
 
-RELATED examples:
-- Follow-up questions.
-- Clarifications.
-- Answers to Vijay's questions.
-- Pronouns referring to previous messages.
-- Questions about the same medical problem.
-- Related medical follow-ups.
+IMPORTANT: USE A LENIENT CONTEXTUAL RELEVANCE POLICY.
 
-NEW examples:
-- Completely unrelated topics.
-- Explicit requests to start a new conversation.
-- A clear switch to an unrelated subject.
+A message does NOT need to discuss exactly the same subject
+to be considered RELATED.
 
-IMPORTANT:
-- Understand Hindi and Hinglish.
-- Short messages like "haan", "aur batao",
-  "kab se?" and "uske liye?" are usually RELATED.
-- Do not create a new conversation merely
-  because the user asks a different question
-  within the same subject.
-- When uncertain, return RELATED.
-- Output only RELATED or NEW.
+Use approximately 65% contextual relevance as your
+decision guideline, not a strict mathematical calculation.
+
+RELATED means:
+- The message continues the previous discussion.
+- It asks a follow-up question.
+- It requests clarification or more details.
+- It refers to something mentioned earlier.
+- It discusses a closely connected subject.
+- It changes to a related aspect of the same broad topic.
+- It asks about a tool, product, technology or method
+  previously discussed.
+- It gives a short response to Vijay's question.
+- It uses references such as "that", "it", "uska",
+  "iske baare mein", "aur batao".
+- It changes from one related technical question to another.
+
+NEW means:
+- The message is completely unrelated to the previous
+  conversation.
+- There is no meaningful contextual connection.
+- The user explicitly requests a new conversation.
+- The user starts discussing an entirely different subject.
+
+EXAMPLES:
+
+Previous: Building an AI voice assistant.
+New: Which microphone should I buy?
+Decision: RELATED
+
+Previous: Discussing Fish Audio TTS.
+New: Does it support voice cloning?
+Decision: RELATED
+
+Previous: Discussing Redis memory.
+New: How do I install it?
+Decision: RELATED
+
+Previous: Discussing a laptop.
+New: What about its battery?
+Decision: RELATED
+
+Previous: Discussing an AI assistant.
+New: Can we improve its personality?
+Decision: RELATED
+
+Previous: Discussing cricket.
+New: Explain how photosynthesis works.
+Decision: NEW
+
+HINGLISH AND HINDI:
+Understand Hindi, Hinglish and English equally well.
+
+Short messages such as:
+"haan", "accha", "aur batao",
+"kitna time lagega?", "uske liye?",
+"what about that?" are usually RELATED.
+
+VERY IMPORTANT:
+- Be forgiving.
+- Prefer continuing a conversation when uncertain.
+- Do not split conversations because of small topic changes.
+- Consider the entire recent context.
+- Do not require exact keyword matches.
+- Do not classify every different question as NEW.
+
+Return only RELATED or NEW.
 `
       },
       {
@@ -66,10 +116,13 @@ IMPORTANT:
     max_completion_tokens: 5
   });
 
-  const result =
-    completion.choices[0]?.message?.content
-      ?.trim()
-      .toUpperCase();
+  const result = completion.choices[0]?.message?.content
+    ?.trim()
+    .toUpperCase();
 
-  return result === "RELATED";
+  // Fail open: preserve history if classification is uncertain.
+  if (result?.includes("RELATED")) return true;
+  if (result?.includes("NEW")) return false;
+
+  return true;
 }

@@ -35,7 +35,8 @@ import {
 import {
   getActiveConversation,
   createNewConversation,
-  resetActiveConversation
+  resetActiveConversation,
+  refreshActiveConversation
 } from "./services/activeConversation.js";
 
 const app = express();
@@ -55,6 +56,7 @@ const RESET_REPLY =
   "Bilkul yaar! Nayi conversation shuru karte hain. Batao, kya chal raha hai?";
 
 // Helpers
+
 async function getSession(transcript, forceNew = false) {
   if (forceNew) {
     const conversationId = await resetActiveConversation();
@@ -69,12 +71,12 @@ async function getSession(transcript, forceNew = false) {
 
   const activeId = await getActiveConversation();
 
-  const session = await prepareConversation(activeId, transcript);
+  const session = await prepareConversation(
+    activeId,
+    transcript
+  );
 
-  if (session.isNew) {
-    await createNewConversation();
-    session.conversationId = await getActiveConversation();
-  }
+  await refreshActiveConversation(session.conversationId);
 
   return session;
 }
