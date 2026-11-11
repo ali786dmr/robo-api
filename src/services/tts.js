@@ -37,14 +37,23 @@ async function requestFishAudio(text, signal) {
     throw new Error("TTS text cannot be empty");
   }
 
-  const body = {
-    text: text.trim(),
-    format: "mp3",
-    sample_rate: 44100,
-    mp3_bitrate: 128,
-    chunk_length: 300,
-    normalize: true
-  };
+  
+const body = {
+  text: text.trim(),
+  format: "mp3",
+  sample_rate: 44100,
+  mp3_bitrate: 128,
+
+  chunk_length: 200,
+  normalize: true,
+
+  // Slightly quicker, more natural delivery
+  prosody: {
+    speed: 1.08,
+    volume: -1.5
+  }
+};
+
 
   // Optional: selected Fish Audio voice/model ID.
   if (process.env.FISH_REFERENCE_ID) {

@@ -117,6 +117,82 @@ app.get("/", (req, res) => {
   });
 });
 
+
+// Text-only TTS: JSON text -> Fish Audio -> raw PCM
+app.post("/say", async (req, res) => {
+  let responseStarted = false;
+
+  try {
+    const text = req.body?.text;
+
+    if (typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "Please provide text."
+      });
+    }
+
+    if (text.length > 1000) {
+      return res.status(400).json({
+        success: false,
+        error: "Text cannot exceed 1000 characters."
+      });
+    }
+
+    const speechText = formatSpeechText(text);
+
+    console.log("[SAY]", speechText);
+
+    // Set raw PCM response headers.
+    res.status(200);
+
+    res.set({
+      "Content-Type": "application/octet-stream",
+      "Cache-Control": "no-store, no-transform",
+      "X-Audio-Format": "pcm_u8",
+      "X-Audio-Sample-Rate": "24000",
+      "X-Audio-Channels": "1",
+      "X-Audio-Bit-Depth": "8"
+    });
+
+    res.flushHeaders();
+    responseStarted = true;
+
+    let totalBytes = 0;
+    let chunks = 0;
+
+    // Stream Fish Audio output through FFmpeg.
+    for await (const chunk of streamSpeechPcm(speechText)) {
+      await writeChunk(res, chunk);
+
+      totalBytes += chunk.length;
+      chunks++;
+    }
+
+    console.log("[SAY] Audio completed", {
+      chunks,
+      totalBytes,
+      durationSeconds: (totalBytes / 24000).toFixed(2)
+    });
+
+    if (!res.destroyed) {
+      res.end();
+    }
+
+  } catch (error) {
+    console.error("[SAY ERROR]", error);
+
+    if (responseStarted) {
+      if (!res.destroyed) {
+        res.destroy(error);
+      }
+    } else {
+      sendError(res, error);
+    }
+  }
+});
+
+
 // Normal chat: Audio upload -> JSON + WAV
 app.post("/chat", upload.single("audio"), async (req, res) => {
   if (!req.file) {
