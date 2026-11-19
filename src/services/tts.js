@@ -11,8 +11,12 @@ const TEMP_DIR = path.resolve("temp");
 
 const FISH_API_URL = "https://api.fish.audio/v1/tts";
 const FISH_MODEL = process.env.FISH_MODEL || "s2.1-pro-free";
-const FISH_REFERENCE_ID = process.env.FISH_REFERENCE_ID || "5a71c956cac446c6be26f7a495ba82a6";
+const FISH_REFERENCE_ID =
+  process.env.FISH_REFERENCE_ID || "5a71c956cac446c6be26f7a495ba82a6";
 const FISH_SPEED = Number(process.env.FISH_SPEED) || 1.0;
+
+// Keep volume at 0 for best quality (do not use -1.5)
+const FISH_VOLUME = Number(process.env.FISH_VOLUME) || 0;
 
 const SAMPLE_RATE = 24000;
 const CHANNELS = 1;
@@ -22,6 +26,20 @@ async function requestFishAudio(text, signal) {
   const apiKey = process.env.FISH_API_KEY;
   if (!apiKey) throw new Error("FISH_API_KEY is missing");
 
+  const body = {
+    text: text.trim(),
+    reference_id: FISH_REFERENCE_ID,
+    format: "mp3",
+    sample_rate: 44100,
+    mp3_bitrate: 128,
+    chunk_length: 200,
+    normalize: true,
+    prosody: {
+      speed: FISH_SPEED,   // 1.0 = natural
+      volume: FISH_VOLUME  // 0 = full quality (not -1.5)
+    }
+  };
+
   const response = await fetch(FISH_API_URL, {
     method: "POST",
     headers: {
@@ -29,21 +47,14 @@ async function requestFishAudio(text, signal) {
       "Content-Type": "application/json",
       model: FISH_MODEL
     },
-    body: JSON.stringify({
-      text,
-      reference_id: FISH_REFERENCE_ID,
-      format: "mp3",
-      sample_rate: 44100,
-      mp3_bitrate: 128,
-      chunk_length: 200,
-      normalize: true,
-      prosody: { speed: FISH_SPEED, volume: 0 }
-    }),
+    body: JSON.stringify(body),
     signal
   });
 
   if (!response.ok) {
-    throw new Error(`Fish Audio API error ${response.status}: ${await response.text()}`);
+    throw new Error(
+      `Fish Audio API error ${response.status}: ${await response.text()}`
+    );
   }
   if (!response.body) throw new Error("Fish Audio returned an empty response");
 
@@ -66,10 +77,15 @@ export async function generateSpeech(text) {
     await fs.writeFile(mp3Path, mp3);
 
     await execFileAsync("ffmpeg", [
-      "-y", "-hide_banner", "-loglevel", "error",
+      "-y",
+      "-hide_banner",
+      "-loglevel", "error",
       "-i", mp3Path,
-      "-vn", "-ac", String(CHANNELS), "-ar", String(SAMPLE_RATE),
-      "-c:a", "pcm_s16le", "-f", "wav",
+      "-vn",
+      "-ac", String(CHANNELS),
+      "-ar", String(SAMPLE_RATE),
+      "-c:a", "pcm_s16le",
+      "-f", "wav",
       wavPath
     ]);
 
@@ -94,8 +110,6 @@ export async function generateSpeech(text) {
 
 // Used by /chat/stream and /say.
 // Yields raw unsigned 8-bit, 24 kHz, mono PCM chunks as FFmpeg produces them.
-// Every error path is awaited or caught, so nothing becomes an unhandled
-// promise rejection (a likely cause of replies being cut off).
 export async function* streamSpeechPcm(text) {
   const clean = text?.trim();
   if (!clean) throw new Error("TTS text cannot be empty");
@@ -106,40 +120,54 @@ export async function* streamSpeechPcm(text) {
   try {
     const response = await requestFishAudio(clean, controller.signal);
 
-    ffmpeg = spawn("ffmpeg", [
-      "-hide_banner", "-loglevel", "error", "-nostdin",
-      "-probesize", "32768", "-analyzeduration", "0",
-      "-i", "pipe:0",
-      "-vn", "-ac", String(CHANNELS), "-ar", String(SAMPLE_RATE),
-      "-acodec", "pcm_u8", "-f", "u8",
-      "pipe:1"
-    ], { stdio: ["pipe", "pipe", "pipe"] });
+    ffmpeg = spawn(
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-loglevel", "error",
+        "-nostdin",
+        "-probesize", "32768",
+        "-analyzeduration", "0",
+        "-i", "pipe:0",
+        "-vn",
+        "-ac", String(CHANNELS),
+        "-ar", String(SAMPLE_RATE),
+        "-acodec", "pcm_u8",
+        "-f", "u8",
+        "pipe:1"
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
 
     let stderr = "";
     ffmpeg.stderr.setEncoding("utf8");
-    ffmpeg.stderr.on("data", data => {
+    ffmpeg.stderr.on("data", (data) => {
       stderr = (stderr + data).slice(-4000);
     });
 
     let ffmpegError = null;
 
-    const exited = new Promise(resolve => {
-      ffmpeg.once("error", err => {
+    const exited = new Promise((resolve) => {
+      ffmpeg.once("error", (err) => {
         ffmpegError = err;
         resolve();
       });
       ffmpeg.once("close", (code, signal) => {
         if (code !== 0) {
-          ffmpegError = new Error(`FFmpeg failed (${code ?? signal}): ${stderr.trim()}`);
+          ffmpegError = new Error(
+            `FFmpeg failed (${code ?? signal}): ${stderr.trim()}`
+          );
         }
         resolve();
       });
     });
 
-    const feeding = pipeline(Readable.fromWeb(response.body), ffmpeg.stdin)
-      .catch(err => {
-        if (!ffmpegError) ffmpegError = err;
-      });
+    const feeding = pipeline(
+      Readable.fromWeb(response.body),
+      ffmpeg.stdin
+    ).catch((err) => {
+      if (!ffmpegError) ffmpegError = err;
+    });
 
     for await (const chunk of ffmpeg.stdout) {
       if (chunk.length) yield chunk;
@@ -147,7 +175,6 @@ export async function* streamSpeechPcm(text) {
 
     await Promise.all([exited, feeding]);
     if (ffmpegError) throw ffmpegError;
-
   } finally {
     controller.abort();
     if (ffmpeg && ffmpeg.exitCode === null && ffmpeg.signalCode === null) {
