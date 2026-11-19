@@ -1,77 +1,94 @@
+
 import Groq from "groq-sdk";
 import { CONFIG } from "../config/config.js";
 import { VIJAY_PROMPT } from "../prompts/vijay.js";
 
 const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-  maxRetries: 1
+  apiKey: process.env.GROQ_API_KEY
 });
 
-const SENTENCE_BREAK = /[.!?।]+\s/;
-const MAX_CLAUSE_CHARS = 180;
+const SYSTEM_MESSAGE = {
+  role: "system",
+  content: VIJAY_PROMPT
+};
 
-function buildRequest(userText, history, stream) {
-  const request = {
+// Existing non-streaming function retained for compatibility.
+export async function generateResponse(userText, history = []) {
+  const completion = await groq.chat.completions.create({
     model: CONFIG.llm.model,
     messages: [
-      { role: "system", content: VIJAY_PROMPT },
-      ...history.slice(-CONFIG.llm.historyMessages),
+      SYSTEM_MESSAGE,
+      ...history,
       { role: "user", content: userText }
     ],
-    temperature: CONFIG.llm.temperature,
-    max_completion_tokens: CONFIG.llm.maxTokens,
-    stream
-  };
+    temperature: 0.6,
+    max_completion_tokens: CONFIG.llm.maxTokens || 300
+  });
 
-  // gpt-oss models think before answering. "low" keeps the delay short.
-  if (CONFIG.llm.model.startsWith("openai/gpt-oss")) {
-    request.reasoning_effort = CONFIG.llm.reasoningEffort;
+  const answer = completion.choices[0]?.message?.content?.trim();
+
+  if (!answer) {
+    throw new Error("LLM generated an empty response");
   }
 
-  return request;
+  return answer;
 }
 
-// Index just after the first complete sentence in buffer, or -1 if none is ready yet.
-function nextBreak(buffer) {
-  const match = SENTENCE_BREAK.exec(buffer);
-  if (match) return match.index + match[0].length;
+// New streaming function.
+// Text is emitted in word groups, while the LLM generates.
+export async function generateResponseStream(
+  userText,
+  history = [],
+  onText = async () => { }
+) {
+  const completion = await groq.chat.completions.create({
+    model: CONFIG.llm.model,
+    messages: [
+      SYSTEM_MESSAGE,
+      ...history,
+      { role: "user", content: userText }
+    ],
+    temperature: 0.6,
+    max_completion_tokens: CONFIG.llm.maxTokens || 300,
+    stream: true
+  });
 
-  // Very long run-on text with no full stop: cut at a space so speech still starts.
-  if (buffer.length > MAX_CLAUSE_CHARS) {
-    const space = buffer.lastIndexOf(" ", MAX_CLAUSE_CHARS);
-    if (space > 40) return space + 1;
-  }
+  let fullAnswer = "";
+  let pending = "";
 
-  return -1;
-}
+  for await (const part of completion) {
+    const delta = part.choices[0]?.delta?.content || "";
 
-// Streams the answer. onSentence(sentence) runs as soon as each sentence is complete,
-// so speech can start while the model is still writing the rest.
-export async function streamReply(userText, history = [], onSentence = () => { }) {
-  const stream = await groq.chat.completions.create(buildRequest(userText, history, true));
-
-  let full = "";
-  let buffer = "";
-
-  for await (const part of stream) {
-    const delta = part.choices?.[0]?.delta?.content;
     if (!delta) continue;
 
-    full += delta;
-    buffer += delta;
+    fullAnswer += delta;
+    pending += delta;
 
-    let end;
-    while ((end = nextBreak(buffer)) !== -1) {
-      const sentence = buffer.slice(0, end).trim();
-      buffer = buffer.slice(end);
-      if (sentence) onSentence(sentence);
+    // Emit complete words rather than individual model tokens.
+    const matches = [...pending.matchAll(/\S+\s+/g)];
+
+    if (matches.length) {
+      const emitted = matches.map(match => match[0]);
+
+      for (const word of emitted) {
+        await onText(word);
+      }
+
+      pending = pending.slice(
+        emitted.join("").length
+      );
     }
   }
 
-  if (buffer.trim()) onSentence(buffer.trim());
+  if (pending) {
+    await onText(pending);
+  }
 
-  const answer = full.trim();
-  if (!answer) throw new Error("LLM generated an empty response");
+  const answer = fullAnswer.trim();
+
+  if (!answer) {
+    throw new Error("LLM generated an empty response");
+  }
 
   return answer;
 }
