@@ -1,42 +1,11 @@
-
 export const CONFIG = {
-  port: process.env.PORT || 3000,
-
-  stt: {
-    model: "whisper-large-v3"
-  },
-
-  audio: {
-    // Microphone input
-    inputSampleRate: 16000,
-    inputChannels: 1,
-    inputBitDepth: 16,
-
-    // ESP32 streaming output
-    sampleRate: 24000,
-    channels: 1,
-    bitDepth: 8,
-
-    // Normal /chat WAV output
-    wavBitDepth: 16
-  },
+  port: Number(process.env.PORT) || 3000,
 
   llm: {
-    model: "openai/gpt-oss-20b",
-    maxCharacters: 500,
-    maxTokens: 300
-  },
-
-  tts: {
-    provider: "fish",
-    model: "s2.1-pro-free",
-
-    format: "mp3",
-    sampleRate: 44100,
-    mp3Bitrate: 128,
-
-    outputSampleRate: 24000,
-    outputChannels: 1,
-    outputBitDepth: 8
+    model: process.env.LLM_MODEL || "openai/gpt-oss-20b",
+    maxTokens: Number(process.env.LLM_MAX_TOKENS) || 300,
+    temperature: 0.5,
+    reasoningEffort: process.env.LLM_REASONING_EFFORT || "low",
+    historyMessages: 6          // last 3 user/assistant turns sent to the model
   }
 };
