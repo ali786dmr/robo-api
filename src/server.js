@@ -59,29 +59,6 @@ async function getSession(transcript, forceNew = false) {
   return session;
 }
 
-async function readMicBody(req) {
-  const chunks = [];
-  let total = 0;
-
-  for await (const chunk of req) {
-    total += chunk.length;
-    if (total > MAX_MIC_BYTES) {
-      const error = new Error("Recording too large.");
-      error.status = 413;
-      throw error;
-    }
-    chunks.push(chunk);
-  }
-
-  if (!total) {
-    const error = new Error("No microphone audio received.");
-    error.status = 400;
-    throw error;
-  }
-
-  return Buffer.concat(chunks, total);
-}
-
 async function writeChunk(res, chunk) {
   if (res.destroyed) throw new Error("Client disconnected");
   if (!res.write(chunk)) {
@@ -117,56 +94,36 @@ function startAudioResponse(res, conversationId) {
   res.flushHeaders();
 }
 
-// Speaks one sentence into the response. Headers are sent only once audio bytes
-// exist, so a Fish/FFmpeg failure can still return a clean JSON error.
-async function speakSentence(res, sentence, ctx) {
-  if (res.destroyed) throw new Error("Client disconnected");
-
-  const audio = streamSpeechPcm(sentence);
+// ONE Fish Audio call for the whole answer, streamed straight into the
+// response as it's produced by FFmpeg. This is your original playback
+// pipeline: the headers are sent only once the first audio bytes exist, so a
+// Fish/FFmpeg failure can still come back as a clean JSON error instead of a
+// half-open connection.
+async function speakFullAnswer(res, text, conversationId) {
+  const audio = streamSpeechPcm(text);
+  let started = false;
+  let bytes = 0;
 
   try {
-    const first = await audio.next(); // fails here, before any bytes are sent, if Fish fails
+    const first = await audio.next();
 
-    if (!ctx.started) {
-      startAudioResponse(res, ctx.conversationId);
-      ctx.started = true;
-    }
+    startAudioResponse(res, conversationId);
+    started = true;
 
     if (!first.done) {
       await writeChunk(res, first.value);
-      ctx.bytes += first.value.length;
+      bytes += first.value.length;
     }
 
     for await (const chunk of audio) {
       await writeChunk(res, chunk);
-      ctx.bytes += chunk.length;
+      bytes += chunk.length;
     }
   } finally {
     await audio.return();
   }
-}
 
-// Sentences are queued in order and spoken one after another, while the LLM keeps writing.
-function createSpeechQueue(res, conversationId) {
-  const ctx = { started: false, bytes: 0, conversationId, sentences: 0, lastError: null };
-  let chain = Promise.resolve();
-
-  const enqueue = rawSentence => {
-    const sentence = formatSpeechText(rawSentence);
-    if (!sentence) return;
-
-    ctx.sentences++;
-    console.log("[SAY]", sentence);
-
-    chain = chain
-      .then(() => speakSentence(res, sentence, ctx))
-      .catch(error => {
-        ctx.lastError = error;
-        console.error("[SENTENCE ERROR]", error.message);
-      });
-  };
-
-  return { ctx, enqueue, done: () => chain };
+  return { started, bytes };
 }
 
 // ----------------------------------------------------------------------------
@@ -177,7 +134,7 @@ app.get("/", (req, res) => {
   res.json({
     name: "Vijay Thalapathy AI",
     status: "online",
-    version: "MVP 2.0",
+    version: "MVP 2.1",
     memory: "Redis",
     conversationExpiry: "24 hours"
   });
@@ -198,17 +155,15 @@ app.post("/say", async (req, res) => {
     const speechText = formatSpeechText(text);
     console.log("[SAY]", speechText);
 
-    const ctx = { started: false, bytes: 0, conversationId: "say", sentences: 1, lastError: null };
-    await speakSentence(res, speechText, ctx);
-
-    if (!ctx.started) throw new Error("No audio was generated");
+    const { started } = await speakFullAnswer(res, speechText, "say");
+    if (!started) throw new Error("No audio was generated");
     if (!res.destroyed) res.end();
   } catch (error) {
     sendError(res, error);
   }
 });
 
-// Normal chat: audio file upload -> JSON + WAV.
+// Normal chat: audio file upload -> JSON + WAV. Unchanged from your original.
 app.post("/chat", upload.single("audio"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({
@@ -263,8 +218,9 @@ app.post("/chat", upload.single("audio"), async (req, res) => {
 });
 
 // Main voice endpoint used by the ESP32.
-//   Robot command   -> 200 application/json  { type: "command", code: "MOVE_FORWARD_10M", ... }
-//   Normal question -> 200 raw PCM audio (unsigned 8-bit, 24 kHz, mono), metadata in headers
+//   Robot command    -> 200 application/json  { type: "command", code: "MOVE_FORWARD_10M", ... }
+//   Normal question  -> 200 raw PCM audio (unsigned 8-bit, 24 kHz, mono), ONE continuous
+//                        Fish Audio synthesis for the whole answer (your original quality).
 app.post("/chat/stream", async (req, res) => {
   const started = Date.now();
 
@@ -277,15 +233,16 @@ app.post("/chat/stream", async (req, res) => {
     }
 
     // Phrases are transcribed while the user is still talking (pause-based),
-    // so a long question only adds the time of its last phrase.
+    // so a long question only adds the time of its last phrase. This only
+    // speeds up STT - it has no effect on the TTS/playback quality.
     const segmenter = new PauseSegmenter({ sampleRate });
-    const transcripts = [];
+    const transcriptJobs = [];
     let totalBytes = 0;
 
     const queuePhrase = phrase => {
       const job = transcribePcmBuffer(phrase, sampleRate);
       job.catch(() => { });       // real error is raised by Promise.all below
-      transcripts.push(job);
+      transcriptJobs.push(job);
     };
 
     for await (const chunk of req) {
@@ -307,10 +264,10 @@ app.post("/chat/stream", async (req, res) => {
     const lastPhrase = segmenter.flush();
     if (lastPhrase) queuePhrase(lastPhrase);
 
-    const parts = await Promise.all(transcripts);
+    const parts = await Promise.all(transcriptJobs);
     const transcript = parts.map(text => text.trim()).filter(Boolean).join(" ");
 
-    console.log("[MIC] Received:", totalBytes, "bytes in", transcripts.length, "phrase(s)");
+    console.log("[MIC] Received:", totalBytes, "bytes in", transcriptJobs.length, "phrase(s)");
 
     if (!transcript) {
       return res.status(400).json({ success: false, error: "No speech detected." });
@@ -343,17 +300,13 @@ app.post("/chat/stream", async (req, res) => {
       });
     }
 
-    // Normal question: stream the answer as speech, sentence by sentence.
-    const speech = createSpeechQueue(res, cid);
-    let answer;
+    // Normal question: get the FULL answer first, exactly like your original
+    // /chat/stream, then speak it in one continuous Fish Audio synthesis.
+    const rawAnswer = session.resetCommand
+      ? RESET_REPLY
+      : await streamReply(transcript, session.history);   // onSentence callback unused here
 
-    if (session.resetCommand) {
-      answer = RESET_REPLY;
-      speech.enqueue(answer);
-    } else {
-      answer = formatSpeechText(await streamReply(transcript, session.history, speech.enqueue));
-    }
-
+    const answer = formatSpeechText(rawAnswer);
     console.log("[VIJAY]", answer);
 
     const commands = planReplyCommands(transcript, answer).map(c => c.code);
@@ -362,18 +315,14 @@ app.post("/chat/stream", async (req, res) => {
     await saveConversationTurn(cid, transcript, answer);
     setLastTurn(cid, { transcript, reply: answer, commands });
 
-    await speech.done();
-
-    if (!speech.ctx.started) {
-      throw speech.ctx.lastError || new Error("No audio was generated");
-    }
+    const { started: audioStarted, bytes } = await speakFullAnswer(res, answer, cid);
+    if (!audioStarted) throw new Error("No audio was generated");
 
     res.end();
 
     console.log("[STREAM] Complete", {
-      sentences: speech.ctx.sentences,
-      audioBytes: speech.ctx.bytes,
-      durationSeconds: (speech.ctx.bytes / 24000).toFixed(2),
+      audioBytes: bytes,
+      durationSeconds: (bytes / 24000).toFixed(2),
       processingTimeMs: Date.now() - started
     });
   } catch (error) {
@@ -382,7 +331,9 @@ app.post("/chat/stream", async (req, res) => {
   }
 });
 
-// ESP32 calls this after it finishes speaking the reply.
+// ESP32 calls this after it finishes speaking the reply, to get the reply
+// text (for the /voice status page) and any robot movement commands found
+// inside the AI's own reply ("Turn left 90 degree. Move forward 5 meter.").
 app.get("/robot/last", (req, res) => {
   const cid = String(req.query.cid || "");
   if (!/^[a-f0-9-]{36}$/.test(cid)) {
@@ -452,6 +403,6 @@ app.listen(CONFIG.port, "0.0.0.0", () => {
   console.log(`Server: http://localhost:${CONFIG.port}`);
   console.log("STT: Groq Whisper Large V3");
   console.log("LLM:", CONFIG.llm.model);
-  console.log("TTS: Fish Audio (streamed per sentence)");
+  console.log("TTS: Fish Audio (single synthesis per reply, original quality settings)");
   console.log("Output: 24kHz unsigned 8-bit PCM Mono");
 });
