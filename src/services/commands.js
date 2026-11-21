@@ -1,5 +1,5 @@
 // services/commands.js
-// Motor commands are extracted ONLY from the user's transcript.
+// Executable movement commands come ONLY from the user's transcript.
 
 const MAX_DISTANCE_M = 15;
 const MAX_DEGREES = 360;
@@ -61,6 +61,9 @@ const MOVEMENT_RE =
 const STOP_RE =
     /\b(stop|halt|freeze|ruko|ruk\s+jao|roko|bas)\b/i;
 
+const STOP_DIRECT_RE =
+    /^(?:(?:hey|hi|vijay|robot|please|can\s+you)\s+)*(?:stop|halt|freeze|ruko|ruk\s+jao|roko|bas)(?:\s+(?:it|that|this|now|moving|the\s+robot|the\s+car|the\s+motors?|please))*$/i;
+
 const NEGATED_STOP_RE =
     /\b(?:don't|do not|never)\s+(?:ever\s+)?(?:stop|halt)\b/i;
 
@@ -95,29 +98,27 @@ function resultInvalid(code, value, unit, reason) {
 
 
 // ============================================================================
-// STOP COMMAND
+// STOP
 // ============================================================================
 
 function isStopCommand(text) {
     if (!STOP_RE.test(text)) return false;
     if (NEGATED_STOP_RE.test(text)) return false;
 
-    const standalone =
-        /^(?:(?:hey|hi|vijay|robot|please)\s+){0,3}(?:stop|halt|freeze|ruko|ruk\s+jao|roko|bas)(?:\s+now)?(?:\s+please)?$/i.test(text);
+    if (STOP_DIRECT_RE.test(text)) return true;
 
     const robotContext =
         /\b(vijay|robot|motor|motors|car|moving|movement|drive|driving)\b/i.test(text);
 
-    return standalone || robotContext;
+    return robotContext;
 }
 
 
 // ============================================================================
-// MAIN COMMAND PARSER
+// MAIN PARSER
 // ============================================================================
 
 export function parseCommand(transcript) {
-
     let text = String(transcript || "")
         .toLowerCase()
         .trim();
@@ -128,6 +129,7 @@ export function parseCommand(transcript) {
         .replace(/\bmoo\s+(left|right)\b/g, "move $1")
         .replace(/\bmoveleft\b/g, "move left")
         .replace(/\bmoveright\b/g, "move right")
+        // Preserve decimal points such as 1.5.
         .replace(/[,.!?](?!\d)/g, " ")
         .replace(/\s+/g, " ")
         .trim();
@@ -146,7 +148,7 @@ export function parseCommand(transcript) {
     }
 
 
-    // Detect directions.
+    // Direction detection.
 
     const directMatch = text.match(DIRECT_DIRECTION_RE);
 
@@ -177,10 +179,9 @@ export function parseCommand(transcript) {
     }
 
 
-    // TURN LEFT / TURN RIGHT
+    // TURN LEFT / TURN RIGHT.
 
     if (isTurn) {
-
         if (isLeft === isRight) return null;
 
         const degreeMatch = text.match(DEGREE_RE);
@@ -219,7 +220,7 @@ export function parseCommand(transcript) {
     }
 
 
-    // SIDEWAYS MOVEMENT IS NOT SUPPORTED.
+    // Sideways movement is not supported.
 
     if (isLeft || isRight) {
         return resultInvalid(
@@ -230,12 +231,12 @@ export function parseCommand(transcript) {
         );
     }
 
-
-    // FORWARD / BACKWARD
-
     if (!isForward && !isBackward) {
         return null;
     }
+
+
+    // FORWARD / BACKWARD.
 
     const distanceMatch = text.match(DISTANCE_RE);
     const bareDistanceMatch = text.match(BARE_DISTANCE_RE);
@@ -274,11 +275,10 @@ export function parseCommand(transcript) {
 
 
 // ============================================================================
-// HUMAN-READABLE RESPONSE
+// DESCRIPTION
 // ============================================================================
 
 export function describeCommand(command) {
-
     if (!command) {
         return "Sorry, I could not understand that movement command.";
     }
