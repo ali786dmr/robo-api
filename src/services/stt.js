@@ -17,7 +17,7 @@ Keep English words in Roman script.
 Use natural Hindi transcription.
 
 Important for car control :
-user can also ask turn left or right or move forward or backward in english so you have to give that in english your epsons eshould be alwys hinglish format nevr in urdu or hindi alwys english and hindi
+user can also ask turn left or right or move forward or backward  so you have to give that in english your responses should  always be in english format for car control  . never in urdu or hindi always english and hinglish
 
 `;
 
