@@ -1,7 +1,8 @@
-// services/commands.js
-// Motor commands are extracted ONLY from the user's transcript.
 
-const MAX_DISTANCE_M = 15;
+// services/commands.js
+// Executable movement commands are extracted ONLY from the user's transcript.
+
+const MAX_DISTANCE_M = 50;
 const MAX_DEGREES = 360;
 
 const DEFAULT_DISTANCE_M = 2;
@@ -37,9 +38,6 @@ const BARE_ANGLE_RE = new RegExp(
     "i"
 );
 
-const DIRECT_DIRECTION_RE =
-    /^(?:(?:hey|hi|please|vijay|robot)\s+){0,3}(forward|forwards|ahead|aage|aagey|aagay|samne|backward|backwards|back|reverse|peeche|pichhe|piche|left|right|bayen|baayen|bayein|baen|daayen|dayen|daayein|dayein)(?:\s+(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty|fifty|sixty|ninety))?(?:\s*(?:meters?|metres?|mtrs?|m|degrees?|deg|°))?$/i;
-
 const FORWARD_RE =
     /\b(forward|forwards|ahead|aage|aagey|aagay|samne)\b/i;
 
@@ -63,7 +61,6 @@ const STOP_RE =
 
 const NEGATED_STOP_RE =
     /\b(?:don't|do not|never)\s+(?:ever\s+)?(?:stop|halt)\b/i;
-
 
 // ============================================================================
 // HELPERS
@@ -93,7 +90,6 @@ function resultInvalid(code, value, unit, reason) {
     };
 }
 
-
 // ============================================================================
 // STOP COMMAND
 // ============================================================================
@@ -111,7 +107,6 @@ function isStopCommand(text) {
     return standalone || robotContext;
 }
 
-
 // ============================================================================
 // MAIN COMMAND PARSER
 // ============================================================================
@@ -124,6 +119,7 @@ export function parseCommand(transcript) {
 
     if (!text) return null;
 
+    // Normalise common speech recognition variations.
     text = text
         .replace(/\bmoo\s+(left|right)\b/g, "move $1")
         .replace(/\bmoveleft\b/g, "move left")
@@ -132,9 +128,7 @@ export function parseCommand(transcript) {
         .replace(/\s+/g, " ")
         .trim();
 
-
-    // STOP takes priority.
-
+    // 1. STOP
     if (isStopCommand(text)) {
         return {
             action: "stop",
@@ -145,58 +139,35 @@ export function parseCommand(transcript) {
         };
     }
 
-
-    // Detect directions.
-
-    const directMatch = text.match(DIRECT_DIRECTION_RE);
-
+    // 2. DETECT DIRECTIONS
     const isForward = FORWARD_RE.test(text);
     const isBackward = BACKWARD_RE.test(text);
 
     const isLeft = LEFT_RE.test(text);
     const isRight = RIGHT_RE.test(text);
 
+    // Do not execute contradictory commands.
     if ((isForward && isBackward) || (isLeft && isRight)) {
         return null;
     }
 
-    const directIsTurn =
-        Boolean(directMatch && (isLeft || isRight));
-
-    const directIsMove =
-        Boolean(directMatch && (isForward || isBackward));
-
-    const isTurn =
-        TURN_RE.test(text) || directIsTurn;
-
-    const isMovement =
-        MOVEMENT_RE.test(text) || directIsMove;
-
-    if (!isTurn && !isMovement) {
-        return null;
-    }
-
-
-    // TURN LEFT / TURN RIGHT
-
-    if (isTurn) {
-
-        if (isLeft === isRight) return null;
+    // 3. LEFT / RIGHT ALWAYS MEANS TURN.
+    // "left", "move left", "go left", "please turn left"
+    // and "turn left" all trigger a left turn.
+    if (isLeft || isRight) {
 
         const degreeMatch = text.match(DEGREE_RE);
         const bareAngleMatch = text.match(BARE_ANGLE_RE);
 
-        const directAngle = directMatch
-            ? parseNumber(directMatch[2])
-            : NaN;
-
-        const value = degreeMatch
-            ? parseNumber(degreeMatch[1] || degreeMatch[2])
+        const angleToken = degreeMatch
+            ? (degreeMatch[1] || degreeMatch[2])
             : bareAngleMatch
-                ? parseNumber(bareAngleMatch[1])
-                : Number.isFinite(directAngle)
-                    ? directAngle
-                    : DEFAULT_TURN_DEG;
+                ? bareAngleMatch[1]
+                : null;
+
+        const value = angleToken
+            ? parseNumber(angleToken)
+            : DEFAULT_TURN_DEG;
 
         if (!(value > 0 && value <= MAX_DEGREES)) {
             return resultInvalid(
@@ -218,60 +189,45 @@ export function parseCommand(transcript) {
         };
     }
 
+    // 4. FORWARD / BACKWARD.
+    // Standalone words also trigger movement.
+    if (isForward || isBackward) {
 
-    // SIDEWAYS MOVEMENT IS NOT SUPPORTED.
+        const distanceMatch = text.match(DISTANCE_RE);
+        const bareDistanceMatch = text.match(BARE_DISTANCE_RE);
 
-    if (isLeft || isRight) {
-        return resultInvalid(
-            "UNSUPPORTED_DIRECTION",
-            0,
-            "m",
-            "The robot cannot move sideways. Ask it to turn left or right."
-        );
-    }
+        const distanceToken = distanceMatch
+            ? distanceMatch[1]
+            : bareDistanceMatch
+                ? bareDistanceMatch[1]
+                : null;
 
+        const value = distanceToken
+            ? parseNumber(distanceToken)
+            : DEFAULT_DISTANCE_M;
 
-    // FORWARD / BACKWARD
+        if (!(value > 0 && value <= MAX_DISTANCE_M)) {
+            return resultInvalid(
+                "INVALID_DISTANCE",
+                value,
+                "m",
+                "Distance must be between 0 and 50 metres."
+            );
+        }
 
-    if (!isForward && !isBackward) {
-        return null;
-    }
+        const direction = isForward ? "forward" : "backward";
 
-    const distanceMatch = text.match(DISTANCE_RE);
-    const bareDistanceMatch = text.match(BARE_DISTANCE_RE);
-
-    const directDistance = directMatch
-        ? parseNumber(directMatch[2])
-        : NaN;
-
-    const value = distanceMatch
-        ? parseNumber(distanceMatch[1])
-        : bareDistanceMatch
-            ? parseNumber(bareDistanceMatch[1])
-            : Number.isFinite(directDistance)
-                ? directDistance
-                : DEFAULT_DISTANCE_M;
-
-    if (!(value > 0 && value <= MAX_DISTANCE_M)) {
-        return resultInvalid(
-            "INVALID_DISTANCE",
+        return {
+            action: "move",
+            direction,
             value,
-            "m",
-            "Distance must be between 0 and 15 metres."
-        );
+            unit: "m",
+            code: `MOVE_${direction.toUpperCase()}_${codeNumber(value)}M`
+        };
     }
 
-    const direction = isForward ? "forward" : "backward";
-
-    return {
-        action: "move",
-        direction,
-        value,
-        unit: "m",
-        code: `MOVE_${direction.toUpperCase()}_${codeNumber(value)}M`
-    };
+    return null;
 }
-
 
 // ============================================================================
 // HUMAN-READABLE RESPONSE
